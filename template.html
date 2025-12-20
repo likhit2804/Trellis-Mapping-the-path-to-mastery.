@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IntelliNodes: Smart Memory</title>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.23.0/cytoscape.min.js"></script>
+    <script src="https://unpkg.com/dagre@0.7.4/dist/dagre.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: #ffffff; height: 100vh; overflow: hidden; }
+        .container { display: flex; height: 100vh; width: 100vw; }
+
+        /* GRAPH PANEL */
+        .graph-panel {
+            width: 55%;
+            background: #fafafa;
+            border-right: 1px solid #e0e0e0;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .graph-header {
+            padding: 16px 24px;
+            background: #ffffff;
+            border-bottom: 1px solid #e0e0e0;
+            z-index: 10;
+        }
+        .graph-header h1 { font-size: 16px; font-weight: 700; color: #000; margin-bottom: 8px; }
+
+        .chapter-nav { display: flex; gap: 8px; align-items: center; }
+        select { padding: 8px; border-radius: 6px; border: 1px solid #ccc; flex: 1; font-size: 13px; }
+        
+        .nav-btn {
+            padding: 8px 12px; background: #fff; color: #000; border: 1px solid #ccc;
+            border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600;
+        }
+        .nav-btn:hover { background: #f4f4f4; }
+        .nav-btn.primary { background: #000; color: #fff; border-color: #000; }
+        .nav-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        #cy { flex: 1; background: #fafafa; }
+
+        /* CHAT PANEL */
+        .chat-panel {
+            flex: 1; background: #ffffff; display: flex; flex-direction: column;
+        }
+        
+        /* Node Navigation Header */
+        .node-nav-header {
+            padding: 16px 24px;
+            border-bottom: 1px solid #e0e0e0;
+            background: #f9f9f9;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .active-node-info { display: flex; flex-direction: column; }
+        .active-label { font-size: 14px; font-weight: 700; color: #000; }
+        .active-status { font-size: 11px; color: #666; margin-top: 2px; }
+
+        .node-controls { display: flex; gap: 8px; }
+
+        .chat-messages {
+            flex: 1; padding: 32px; overflow-y: auto;
+            display: flex; flex-direction: column; gap: 20px;
+        }
+        .message { display: flex; gap: 14px; max-width: 80%; }
+        .message.ai .msg-content { background: #f4f4f4; padding: 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; }
+        .message.user { align-self: flex-end; flex-direction: row-reverse; }
+        .message.user .msg-content { background: #000; color: #fff; padding: 14px; border-radius: 12px; font-size: 14px; }
+        
+        .chat-input-area { padding: 24px; border-top: 1px solid #e0e0e0; }
+        .input-wrapper { display: flex; gap: 10px; }
+        textarea { flex: 1; padding: 14px; border: 2px solid #e0e0e0; border-radius: 10px; height: 50px; resize: none; }
+        button.send { width: 50px; background: #000; color: #fff; border: none; border-radius: 10px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div class="graph-panel">
+        <div class="graph-header">
+            <h1>Curriculum Explorer</h1>
+            <div class="chapter-nav">
+                <button class="nav-btn" id="prevChapBtn" onclick="shiftChapter(-1)">Prev Chap</button>
+                <select id="chapterSelect" onchange="selectChapter(this.value)"></select>
+                <button class="nav-btn" id="nextChapBtn" onclick="shiftChapter(1)">Next Chap</button>
+            </div>
+        </div>
+        <div id="cy"></div>
+    </div>
+
+    <div class="chat-panel">
+        <div class="node-nav-header">
+            <div class="active-node-info">
+                <span class="active-label" id="activeNodeLabel">Select a topic...</span>
+                <span class="active-status" id="activeNodeStatus">Waiting for selection</span>
+            </div>
+            <div class="node-controls">
+                <button class="nav-btn" id="btnNextNode" onclick="nextNode()" disabled>Next Topic →</button>
+            </div>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="message ai"><div class="msg-content">Hello! I have Long-Term Memory (Pinecone) enabled. Click a node to start.</div></div>
+        </div>
+        
+        <div class="chat-input-area">
+            <div class="input-wrapper">
+                <textarea id="userInput" placeholder="Ask about this topic..."></textarea>
+                <button class="send" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let fullData = [];
+    let chapters = [];
+    let currentChapterIndex = 0;
+    let activeNodeId = null;
+    let cy;
+
+    async function init() {
+        try {
+            const res = await fetch('http://localhost:5000/api/graph');
+            fullData = await res.json();
+            
+            // Filter Chapters
+            chapters = fullData.filter(el => el.data && el.data.type === "Chapter")
+                .sort((a,b) => {
+                    const numA = parseInt(a.data.label);
+                    const numB = parseInt(b.data.label);
+                    if(!isNaN(numA) && !isNaN(numB)) return numA - numB;
+                    return a.data.label.localeCompare(b.data.label);
+                });
+
+            const select = document.getElementById('chapterSelect');
+            select.innerHTML = "";
+            chapters.forEach((chap, index) => {
+                const opt = document.createElement('option');
+                opt.value = index;
+                opt.innerText = chap.data.label;
+                select.appendChild(opt);
+            });
+
+            if(chapters.length > 0) renderChapter(0);
+            else renderFullGraph();
+
+        } catch (err) { console.error(err); alert("Server error"); }
+    }
+
+    function renderChapter(index) {
+        currentChapterIndex = parseInt(index);
+        const chapterNode = chapters[currentChapterIndex];
+        
+        document.getElementById('chapterSelect').value = currentChapterIndex;
+        document.getElementById('prevChapBtn').disabled = currentChapterIndex === 0;
+        document.getElementById('nextChapBtn').disabled = currentChapterIndex === chapters.length - 1;
+
+        // BFS to find content
+        const relevantIds = new Set([chapterNode.data.id]);
+        let queue = [chapterNode.data.id];
+
+        while(queue.length > 0) {
+            const curr = queue.shift();
+            fullData.filter(el => el.data.source === curr && el.data.type === "HAS_PART")
+                    .forEach(edge => {
+                        if(!relevantIds.has(edge.data.target)) {
+                            relevantIds.add(edge.data.target);
+                            queue.push(edge.data.target);
+                        }
+                    });
+        }
+
+        const filtered = fullData.filter(el => {
+            if(el.data.source && el.data.target) {
+                return relevantIds.has(el.data.source) && relevantIds.has(el.data.target);
+            }
+            return relevantIds.has(el.data.id);
+        });
+
+        initCytoscape(filtered);
+        
+        // Reset node selection
+        activeNodeId = null;
+        updateNodeUI("Select a topic...", "Waiting", false);
+    }
+
+    function shiftChapter(dir) {
+        const newIndex = currentChapterIndex + dir;
+        if(newIndex >= 0 && newIndex < chapters.length) renderChapter(newIndex);
+    }
+
+    function selectChapter(val) {
+        if(val !== "") renderChapter(val);
+    }
+
+    function setActiveNode(node) {
+        activeNodeId = node.id();
+        
+        const hasNext = fullData.some(el => 
+            el.data.source === activeNodeId && el.data.type === "REQUIRES"
+        );
+
+        updateNodeUI(node.data('label'), "Active Context Loaded", hasNext);
+        
+        cy.nodes().removeClass('selected');
+        node.addClass('selected');
+        
+        addMessage('ai', `Focused on: <strong>${node.data('label')}</strong>. <br><em style="font-size:11px">I have pulled the textbook content and past chats for this topic.</em>`);
+    }
+
+    function nextNode() {
+        if (!activeNodeId) return;
+
+        const nextEdge = fullData.find(el => 
+            el.data.source === activeNodeId && el.data.type === "REQUIRES"
+        );
+
+        if (nextEdge) {
+            const targetId = nextEdge.data.target;
+            const targetNode = cy.getElementById(targetId);
+
+            if (targetNode.length > 0) {
+                setActiveNode(targetNode);
+                cy.animate({
+                    fit: { eles: targetNode, padding: 50 },
+                    duration: 500
+                });
+            } else {
+                alert("The next topic is in a different chapter!");
+            }
+        }
+    }
+
+    function updateNodeUI(label, status, canGoNext) {
+        document.getElementById('activeNodeLabel').innerText = label;
+        document.getElementById('activeNodeStatus').innerText = status;
+        const btn = document.getElementById('btnNextNode');
+        btn.disabled = !canGoNext;
+        
+        if(canGoNext) {
+            btn.classList.add('primary');
+            btn.innerText = "Next Topic →";
+        } else {
+            btn.classList.remove('primary');
+            btn.innerText = "End of Path";
+        }
+    }
+
+    function initCytoscape(elements) {
+        cy = cytoscape({
+            container: document.getElementById('cy'),
+            elements: elements,
+            boxSelectionEnabled: false,
+            autounselectify: true,
+
+            minZoom: 0.1,    
+            maxZoom: 1.2,    
+            wheelSensitivity: 0.2,
+
+            style: [
+                {
+                    selector: 'node',
+                    style: {
+                        'label': 'data(label)', 'text-valign': 'center', 'text-halign': 'center',
+                        'font-size': '10px', 'width': 120, 'height': 40,
+                        'background-color': '#fff', 'border-width': 1, 'border-color': '#333',
+                        'shape': 'round-rectangle', 'text-wrap': 'wrap', 'text-max-width': 100
+                    }
+                },
+                {
+                    selector: 'node.selected',
+                    style: {
+                        'background-color': '#000', 'color': '#fff', 'border-width': 2, 'border-color': '#000'
+                    }
+                },
+                {
+                    selector: 'node[type="Chapter"]',
+                    style: { 'background-color': '#eee', 'font-weight': 'bold', 'font-size': '11px' }
+                },
+                {
+                    selector: 'node[type="Exercise"]',
+                    style: {
+                        'background-color': '#ff6b6b', 
+                        'shape': 'diamond',
+                        'width': 25,
+                        'height': 25,
+                        'font-size': '9px',
+                        'color': '#333'
+                    }
+                },
+                {
+                    selector: 'edge[type="HAS_PART"]',
+                    style: { 'width': 2, 'line-color': '#ccc', 'target-arrow-color': '#ccc', 'target-arrow-shape': 'triangle', 'curve-style': 'bezier' }
+                },
+                {
+                    selector: 'edge[type="REQUIRES"]',
+                    style: { 'width': 2, 'line-color': '#333', 'target-arrow-color': '#333', 'target-arrow-shape': 'triangle', 'line-style': 'dashed', 'curve-style': 'bezier' }
+                }
+            ],
+            layout: {
+                name: 'dagre',
+                rankDir: 'TB',
+                padding: 100,      
+                spacingFactor: 1.5 
+            }
+        });
+
+        cy.ready(function() {
+            if (cy.zoom() > 1.2) {
+                cy.zoom(1.2);
+                cy.center();
+            }
+        });
+
+        cy.on('tap', 'node', function(evt){
+            setActiveNode(evt.target);
+        });
+    }
+
+    // --- SMART MESSAGING (UPDATED FOR PINECONE) ---
+    async function sendMessage() {
+        const input = document.getElementById('userInput');
+        const text = input.value.trim();
+        
+        if(!text) return;
+        if(!activeNodeId) { alert("Please select a topic node first!"); return; }
+
+        // 1. Show User Message
+        addMessage('user', text);
+        input.value = '';
+
+        try {
+            // 2. API: Get Context from Server (Pinecone Search + Neo4j Content)
+            const res = await fetch('http://localhost:5000/api/context/retrieve', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ node_id: activeNodeId, query: text })
+            });
+            const data = await res.json();
+            
+            // 3. Debug: See what the LLM would see in console
+            const contextDebug = `
+            ACTIVE TOPIC: ${data.active_node.title}
+            TEXTBOOK CONTENT: ${data.active_node.content.substring(0, 300)}...
+            
+            RELEVANT MEMORIES (Pinecone):
+            ${data.memory.join('\n')}
+            `;
+            console.log("CONTEXT SENT TO LLM:", contextDebug);
+
+            // 4. Mock LLM Response (Teammate B will replace this with real OpenAI call)
+           // SHOW THE REAL DATA RETRIEVED FROM SERVER
+            const mockResponse = `
+                <strong>✅ SYSTEM SUCCESS!</strong><br>
+                <strong>Teammate A's Retrieval Pipeline worked.</strong><br><br>
+                
+                <strong>📘 Retrieved Context (First 500 chars):</strong><br>
+                <div style="background:#eee; padding:10px; font-size:11px; border-left:3px solid #000;">
+                    ${data.active_node.content.substring(0, 500)}... 
+                </div><br>
+
+                <strong>🧠 Retrieved Memories:</strong><br>
+                ${data.memory.length} items found.
+            `;
+            // 5. Show AI Message & Log Interaction
+            setTimeout(async () => {
+                addMessage('ai', mockResponse);
+
+                // 6. Log the interaction back to Pinecone for future memory
+                await fetch('http://localhost:5000/api/chat/log', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ node_id: activeNodeId, user_msg: text, ai_msg: mockResponse })
+                });
+            }, 600);
+
+        } catch(e) { 
+            console.error(e);
+            addMessage('ai', "Error connecting to memory server. Is server.py running?");
+        }
+    }
+
+    function addMessage(role, html) {
+        const div = document.getElementById('chatMessages');
+        div.innerHTML += `<div class="message ${role}"><div class="msg-content">${html}</div></div>`;
+        div.scrollTop = div.scrollHeight;
+    }
+
+    init();
+</script>
+</body>
+</html>
